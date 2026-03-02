@@ -1,25 +1,28 @@
 import telebot
 import os
 import zipfile
-from pypdf import PdfReader
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-import img2pdf
 import tempfile
-import pdf2image  # pip install pdf2image
+import pdf2image
+import img2pdf
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-TOKEN = '8766074232:AAG3HpfydnGtxRxtH8iv1yOIW0V1nj9AGXQ'
+# Токен из переменной окружения (на Bothost добавь BOT_TOKEN в Environment Variables)
+TOKEN = os.getenv('BOT_TOKEN')
+if not TOKEN:
+    TOKEN = '8766074232:AAG3HpfydnGtxRxtH8iv1yOIW0V1nj9AGXQ'  # только для локального теста
+
 bot = telebot.TeleBot(TOKEN)
 
-DOWNLOAD_DIR = 'downloads'
+DOWNLOAD_DIR = '/tmp/downloads'  # на сервере используем /tmp (временная папка)
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-user_choices = {}  # {user_id: 'a4_4', 'a4_9', 'thermal_75x120', 'thermal_100x150'}
+user_choices = {}  # {user_id: формат}
 
 @bot.message_handler(commands=['start'])
 def start(message):
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(KeyboardButton("Объединить накладные 📄"))
-    bot.send_message(message.chat.id, "Привет! Выбери формат и пришли ZIP/PDF", reply_markup=markup)
+    bot.send_message(message.chat.id, "Привет! Выбери формат и пришли ZIP или PDF", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: "объединить" in m.text.lower() or m.text == "Объединить накладные 📄")
 def choose_format(message):
@@ -29,24 +32,23 @@ def choose_format(message):
         InlineKeyboardButton("A4 — 9 накладных", callback_data="a4_9"),
     )
     markup.row(
-        InlineKeyboardButton("Термопринтер 75×120 (1 шт)", callback_data="thermal_75x120"),
-        InlineKeyboardButton("Термопринтер 100×150 (1 шт)", callback_data="thermal_100x150"),
+        InlineKeyboardButton("Термопринтер 75×120", callback_data="thermal_75x120"),
+        InlineKeyboardButton("Термопринтер 100×150", callback_data="thermal_100x150"),
     )
     bot.send_message(message.chat.id, "Выбери формат печати:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_format(call):
     user_choices[call.from_user.id] = call.data
-    bot.answer_callback_query(call.id, f"Выбран формат: {call.data}")
+    bot.answer_callback_query(call.id, f"Выбран: {call.data}")
     bot.send_message(call.message.chat.id, "Теперь пришли ZIP или PDF с накладными!")
 
 @bot.message_handler(content_types=['document'])
 def handle_doc(message):
-    # Отладка: получен документ
-    print(f"Получен документ от пользователя {message.from_user.id}: {message.document.file_name}")
+    print(f"[{message.date}] Получен файл от {message.from_user.id}: {message.document.file_name}")
 
     user_id = message.from_user.id
-    format_choice = user_choices.get(user_id, 'thermal_75x120')  # По умолчанию 75x120
+    format_choice = user_choices.get(user_id, 'thermal_75x120')
 
     doc = message.document
     file_info = bot.get_file(doc.file_id)
@@ -57,7 +59,7 @@ def handle_doc(message):
     with open(file_path, 'wb') as f:
         f.write(downloaded)
 
-    bot.reply_to(message, f"Получил {file_name}. Обрабатываю...")
+    bot.reply_to(message, f"Получил {file_name} ({doc.file_size // 1024} КБ). Обрабатываю...")
 
     pdf_paths = []
 
@@ -70,84 +72,89 @@ def handle_doc(message):
             for f in files:
                 if f.lower().endswith('.pdf'):
                     pdf_paths.append(os.path.join(root, f))
-        os.remove(file_path)
+        try:
+            os.remove(file_path)
+        except:
+            pass
 
-        # Отладка: сколько PDF после распаковки
-        print(f"Распаковано {len(pdf_paths)} PDF-файлов")
+        print(f"Распаковано {len(pdf_paths)} PDF")
 
     elif file_name.lower().endswith('.pdf'):
         pdf_paths.append(file_path)
 
     if not pdf_paths:
-        bot.reply_to(message, "PDF не найдены 😔")
+        bot.reply_to(message, "PDF-файлы не найдены 😔")
         return
 
-    # Конвертируем все PDF в изображения
+    # Конвертация PDF → изображения (Poppler должен быть установлен на сервере)
     images = []
     for pdf in pdf_paths:
-        # Если Poppler не в PATH — укажи путь здесь:
-        # pages = pdf2image.convert_from_path(pdf, dpi=300, poppler_path=r'C:\poppler\Library\bin')
-        pages = pdf2image.convert_from_path(
-    pdf,
-    dpi=300,
-    poppler_path=r'C:\poppler\Library\bin'  # ← укажи точный путь к bin
-)
+        try:
+            pages = pdf2image.convert_from_path(pdf, dpi=300)
+            for page in pages:
+                temp_img = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+                page.save(temp_img.name, 'JPEG')
+                images.append(temp_img.name)
+        except Exception as e:
+            print(f"Ошибка конвертации {pdf}: {e}")
+            bot.reply_to(message, f"Ошибка обработки файла {os.path.basename(pdf)}: {str(e)}")
+            continue
 
-        for page in pages:
-            temp_img = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
-            page.save(temp_img.name, 'JPEG')
-            images.append(temp_img.name)
+    if not images:
+        bot.reply_to(message, "Не удалось конвертировать файлы в изображения 😢")
+        return
 
     output_pdf = os.path.join(DOWNLOAD_DIR, f"ready_{message.message_id}.pdf")
 
-    if 'thermal' in format_choice:
-        if '75x120' in format_choice:
-            width_mm, height_mm = 75, 120
-        else:
-            width_mm, height_mm = 100, 150
-
-        size_pt = (img2pdf.mm_to_pt(width_mm), img2pdf.mm_to_pt(height_mm))
-        layout_fun = img2pdf.get_layout_fun(size_pt)
-
-        with open(output_pdf, "wb") as f:
-            f.write(img2pdf.convert(images, layout_fun=layout_fun))
-
-    elif 'a4' in format_choice:
-        a4_pt = (img2pdf.mm_to_pt(210), img2pdf.mm_to_pt(297))
-        layout_fun = img2pdf.get_layout_fun(a4_pt)
-
-        with open(output_pdf, "wb") as f:
-            f.write(img2pdf.convert(images, layout_fun=layout_fun))
-
-    # Отладка: готов PDF
-    print(f"Готов PDF с {len(images)} страницами, формат {format_choice}")
-
-    # Отправляем
-    with open(output_pdf, 'rb') as f:
-        bot.send_document(
-            message.chat.id,
-            f,
-            caption=f"Готово! Формат: {format_choice} | {len(images)} накладных"
-        )
-
-    # Уборка временных файлов
-    for img in images:
-        try:
-            os.remove(img)
-        except:
-            pass
-    for p in pdf_paths:
-        try:
-            os.remove(p)
-        except:
-            pass
     try:
-        os.remove(output_pdf)
-    except:
-        pass
+        if 'thermal' in format_choice:
+            if '75x120' in format_choice:
+                w_mm, h_mm = 75, 120
+            else:
+                w_mm, h_mm = 100, 150
 
-# Запуск бота
-bot.infinity_polling(timeout=30)
+            size_pt = (img2pdf.mm_to_pt(w_mm), img2pdf.mm_to_pt(h_mm))
+            layout_fun = img2pdf.get_layout_fun(size_pt)
 
-# Отладка: бот ожидает
-print("Бот в режиме ожидания сообщений...")
+            with open(output_pdf, "wb") as f:
+                f.write(img2pdf.convert(images, layout_fun=layout_fun))
+
+        else:  # A4
+            a4_pt = (img2pdf.mm_to_pt(210), img2pdf.mm_to_pt(297))
+            layout_fun = img2pdf.get_layout_fun(a4_pt)
+            with open(output_pdf, "wb") as f:
+                f.write(img2pdf.convert(images, layout_fun=layout_fun))
+
+        print(f"Готов PDF: {len(images)} страниц, формат {format_choice}")
+
+        with open(output_pdf, 'rb') as f:
+            bot.send_document(
+                message.chat.id,
+                f,
+                caption=f"Готово! {format_choice} | {len(images)} накладных"
+            )
+
+    except Exception as e:
+        print(f"Ошибка создания PDF: {e}")
+        bot.reply_to(message, f"Ошибка при создании PDF: {str(e)}")
+
+    finally:
+        # Уборка
+        for img in images:
+            try:
+                os.remove(img)
+            except:
+                pass
+        for p in pdf_paths:
+            try:
+                os.remove(p)
+            except:
+                pass
+        try:
+            os.remove(output_pdf)
+        except:
+            pass
+
+print("Бот запущен...")
+print("Ожидание сообщений...")
+bot.infinity_polling(timeout=60, long_polling_timeout=60)

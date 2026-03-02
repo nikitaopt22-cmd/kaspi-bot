@@ -1,0 +1,5 @@
+pyTelegramBotAPI
+pypdf
+pdf2image
+pillow
+img2pdf

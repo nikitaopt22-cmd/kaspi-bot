@@ -1,7 +1,7 @@
 import telebot
 import os
 import zipfile
-from pypdf import PdfMerger
+from pypdf import PdfWriter, PdfReader
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
 # Токен из переменной окружения (на Render добавь BOT_TOKEN в Environment Variables)
@@ -80,11 +80,15 @@ def handle_doc(message):
     output_pdf = os.path.join(DOWNLOAD_DIR, f"ready_{message.message_id}.pdf")
 
     try:
-        merger = PdfMerger()
+        writer = PdfWriter()
+
         for pdf in pdf_paths:
-            merger.append(pdf)
-        merger.write(output_pdf)
-        merger.close()
+            reader = PdfReader(pdf)
+            for page in reader.pages:
+                writer.add_page(page)
+
+        with open(output_pdf, 'wb') as output_file:
+            writer.write(output_file)
 
         print(f"Готов PDF: {len(pdf_paths)} страниц, формат {format_choice}")
 

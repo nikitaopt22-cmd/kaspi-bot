@@ -1,19 +1,13 @@
 import telebot
 import os
 import zipfile
-import tempfile
-import pdf2image
-import img2pdf
+from pypdf import PdfMerger
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-# Токен из переменной окружения (на сервере)
-TOKEN = os.getenv('BOT_TOKEN')
-if not TOKEN:
-    TOKEN = '8766074232:AAG3HpfydnGtxRxtH8iv1yOIW0V1nj9AGXQ'  # только для локального теста
-
+TOKEN = os.getenv('BOT_TOKEN') or '8766074232:AAG3HpfydnGtxRxtH8iv1yOIW0V1nj9AGXQ'
 bot = telebot.TeleBot(TOKEN)
 
-DOWNLOAD_DIR = '/tmp/downloads'  # временная папка на сервере
+DOWNLOAD_DIR = 'downloads'
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 user_choices = {}
@@ -28,10 +22,7 @@ def start(message):
 def choose_format(message):
     markup = InlineKeyboardMarkup()
     markup.row(
-        InlineKeyboardButton("A4 — 4 накладные", callback_data="a4_4"),
-        InlineKeyboardButton("A4 — 9 накладных", callback_data="a4_9"),
-    )
-    markup.row(
+        InlineKeyboardButton("A4", callback_data="a4"),
         InlineKeyboardButton("Термопринтер 75×120", callback_data="thermal_75x120"),
         InlineKeyboardButton("Термопринтер 100×150", callback_data="thermal_100x150"),
     )
@@ -85,61 +76,29 @@ def handle_doc(message):
         bot.reply_to(message, "PDF не найдены 😔")
         return
 
-    images = []
-    for pdf in pdf_paths:
-        try:
-            pages = pdf2image.convert_from_path(pdf, dpi=300)  # Poppler на сервере должен быть
-            for page in pages:
-                temp_img = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
-                page.save(temp_img.name, 'JPEG')
-                images.append(temp_img.name)
-        except Exception as e:
-            print(f"Ошибка конвертации {pdf}: {e}")
-            bot.reply_to(message, f"Ошибка с файлом {os.path.basename(pdf)}: {str(e)}")
-            continue
-
-    if not images:
-        bot.reply_to(message, "Не удалось обработать файлы 😢")
-        return
-
     output_pdf = os.path.join(DOWNLOAD_DIR, f"ready_{message.message_id}.pdf")
 
-    try:
-        if 'thermal' in format_choice:
-            w_mm, h_mm = (75, 120) if '75x120' in format_choice else (100, 150)
-            size_pt = (img2pdf.mm_to_pt(w_mm), img2pdf.mm_to_pt(h_mm))
-            layout_fun = img2pdf.get_layout_fun(size_pt)
-        else:
-            size_pt = (img2pdf.mm_to_pt(210), img2pdf.mm_to_pt(297))
-            layout_fun = img2pdf.get_layout_fun(size_pt)
+    merger = PdfMerger()
+    for pdf in pdf_paths:
+        merger.append(pdf)
+    merger.write(output_pdf)
+    merger.close()
 
-        with open(output_pdf, "wb") as f:
-            f.write(img2pdf.convert(images, layout_fun=layout_fun))
+    print(f"Готов PDF: {len(pdf_paths)} страниц, формат {format_choice}")
 
-        print(f"Готов PDF: {len(images)} страниц, формат {format_choice}")
+    with open(output_pdf, 'rb') as f:
+        bot.send_document(message.chat.id, f, caption=f"Готово! {format_choice} | {len(pdf_paths)} шт")
 
-        with open(output_pdf, 'rb') as f:
-            bot.send_document(message.chat.id, f, caption=f"Готово! {format_choice} | {len(images)} шт")
-
-    except Exception as e:
-        print(f"Ошибка PDF: {e}")
-        bot.reply_to(message, f"Ошибка создания PDF: {str(e)}")
-
-    finally:
-        for img in images:
-            try:
-                os.remove(img)
-            except:
-                pass
-        for p in pdf_paths:
-            try:
-                os.remove(p)
-            except:
-                pass
+    # Уборка
+    for p in pdf_paths:
         try:
-            os.remove(output_pdf)
+            os.remove(p)
         except:
             pass
+    try:
+        os.remove(output_pdf)
+    except:
+        pass
 
 print("Бот запущен...")
 print("Ожидание сообщений...")
